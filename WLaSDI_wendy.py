@@ -1,14 +1,14 @@
 
 import numpy as np
 import numpy.linalg as LA
-import wsindy as ws
+import WLaSDI.wsindy as ws
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp2d, Rbf
 import scipy.integrate as integrate
 from scipy.integrate import solve_ivp
 from itertools import combinations_with_replacement
 import time
-import WENDy as wd
+import WLaSDI.WENDy as wd
 
 class WLaSDI_wendy:
     """
