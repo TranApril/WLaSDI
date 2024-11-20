@@ -12,36 +12,37 @@ from scipy.integrate import solve_ivp
 
 class wsindy:
     """
-     Inputs:
+    Inputs:
        polys: monomial powers to include in library
        trigs: sine / cosine frequencies to include in library
        scale_theta: normalize columns of theta. Ex: scale_theta = 0 means no normalization, scale_theta = 2 means l2 normalization.
        ld: sequential thresholding parameter 
-       tau_p: test function has value 10^-tau_p at penultimate support point. Or, if tau_p<0, directly sets poly degree p = -tau_p
        gamma: Tikhonoff regularization parameter
     """
-    def __init__(self, polys =  np.arange(0, 6), trigs = [], scaled_theta = 0, ld = 0.001, tau_p = 16, gamma = 10**(-np.inf), multiple_tracjectories = False):
+    def __init__(self, polys =  np.arange(0, 6), trigs = [], scaled_theta = 0, ld = 0.001, gamma = 10**(-np.inf), multiple_tracjectories = False, useGLS = 1e-12): 
         self.polys = polys
         self.trigs = trigs
         self.scale_theta = scaled_theta
         self.ld = ld
-        self.tau_p = tau_p
         self.gamma = gamma
         self.coef = None
         self.multiple_trajectories = multiple_tracjectories
+        self.useGLS = useGLS
+        #useGLS = 10**(-12)
 
 
     """
        xobs: x values
        tobs: t values
-       r_whm: width half max
-       s:
+       r_whm: r width half max
+       s: test function support 
        K: # of test function
-       p: FD order 
-       tau: toggle adaptive grid
+       p: test function degree 
+       tau_p: test function has value 10^-tau_p at penultimate support point. Or, if tau_p<0, directly sets poly degree p = -tau_p
     """
-    def getWsindyAdaptive(self, xobs, tobs, r_whm = 30, s = 16, K = 200, p = 2, tau = 1, useGLS = 10**(-12)):
-
+    def getWsindyAdaptive(self, xobs, tobs, r_whm = 30, s = 16, K = 120, p = 2, tau_p = 16):
+        self.tau_p = tau_p
+        tau = 1
         if self.multiple_trajectories == True:
             x_values = xobs[0]
             t_values = tobs[0]
@@ -58,9 +59,9 @@ class wsindy:
         n = xobs.shape[1]
 
         w_sparse = np.zeros((Theta_0.shape[1], n))
-        #mats = [] 
+        mats = [] 
         #ps_all = [[]]
-        #ts_grids = []  
+        ts_grids = []  
         #RTs = []  
         #Ys = []  
         #Gs = [] 
@@ -68,15 +69,15 @@ class wsindy:
 
         for i in range(n):
             grid_i = self.Adaptive_Grid(tobs, xobs[:, i], wsindy_params)
-            V, Vp = self.VVp_build_adaptive_whm(
+            V, Vp, ab_grid = self.VVp_build_adaptive_whm(
                 tobs, grid_i, r_whm, [0, np.inf, 0])
             #ps_all = ps_all.append(ps)
-            #mats.append([V, Vp])
-            #ts_grids.append(ab_grid)
+            mats.append([V, Vp])
+            ts_grids.append(ab_grid)
             #Ys.append(Y)
             #print("use GLS = ", useGLS)
-            if useGLS > 0:
-                Cov = Vp.dot(Vp.T) + useGLS*np.identity(V.shape[0])
+            if self.useGLS > 0:
+                Cov = Vp.dot(Vp.T) + self.useGLS*np.identity(V.shape[0])
                 RT = np.linalg.cholesky(Cov)
                 G = lstsq(RT, V.dot(Theta_0))[0]
                 b = lstsq(RT, Vp.dot(xobs[:, i]))[0]
@@ -104,6 +105,8 @@ class wsindy:
             
         self.coef = w_sparse
         self.tags = tags
+        self.mats = mats
+        self.ts_grids = ts_grids
         return self #w_sparse, ts_grids, mats
 
     
@@ -114,11 +117,89 @@ class wsindy:
        overlap: 
     """
     
-    def getWSindyUniform(self, xobs, tobs, L = 30, overlap = 0.5, useGLS =  10**(-12), opt_tfsupp = False):
-
-        self.opt_tfsupp = opt_tfsupp
+    def getWSindyUniform(self, xobs, tobs, L = 30, overlap = 0.5):
 
         if self.multiple_trajectories == True:
+            num_traj = len(xobs)
+            n = xobs[0].shape[1]
+        else: 
+            num_traj = 1
+            n = xobs.shape[1]
+
+        Theta_0s  = []
+        M_diags = []
+
+        Vs = []
+        Vps = []  
+
+        for traj in range(num_traj):
+            Theta_0, tags, M_diag = self.buildTheta(xobs[traj])
+            Theta_0s.append(Theta_0)
+            M_diags.append(M_diag)
+
+            V, Vp, grid = self.Uniform_grid(tobs[traj], L, overlap, [0, np.inf, 0])
+            Vs.append(V)
+            Vps.append(Vp)
+        
+        w_sparse = np.zeros((Theta_0s[0].shape[1], n))
+
+        
+        #res = []
+        mats = []  
+        
+        
+        #ps_all = [[]]
+        ts_grids = []  
+        #RTs = [] 
+        #Gs = [] #[n,1]
+        #bs = [] #[n,1]
+
+        for i in range(n):
+            Gs = []
+            bs = []
+            for traj in range(num_traj):
+                Vp = Vps[traj]
+                V = Vs[traj]
+                x = xobs[traj]
+                Theta_0 = Theta_0s[traj]
+                if self.useGLS > 0:
+                    Cov = Vp.dot(Vp.T) + self.useGLS*np.identity(V.shape[0])
+                    RT = np.linalg.cholesky(Cov)
+                    G = lstsq(RT, V.dot(Theta_0))[0]
+                    b = lstsq(RT, Vp.dot(x[:, i]))[0]
+                else:
+                    RT = 1/np.linalg.norm(Vp, 2, 1)
+                    RT = np.reshape(RT, (RT.size, 1))
+                    G = np.multiply(V.dot(Theta_0), RT)
+                    temp = Vp.dot(x[:, i])
+                    b = RT.T*temp
+                
+                if self.scale_theta > 0:
+                    G = np.multiply(G, (1/M_diags[traj].T))
+                Gs.append(G)
+                bs.append(b)
+            mats.append([V, Vp])
+            ts_grids.append(grid)
+
+            G = np.vstack(Gs)
+            b = np.vstack(bs)
+            w_sparse_temp = self.sparsifyDynamics(G, b, 1)
+            w_sparse[:, i] = np.ndarray.flatten(w_sparse_temp)
+            
+            #RTs.append(RT)
+            #Gs.append(G)
+            #bs.append(b)
+        self.coef = w_sparse
+        self.tags = tags
+        self.mats = mats
+        self.ts_grids = ts_grids
+        return  self #w_sparse,  ts_grids , mats 
+    
+
+    def getWSindyUniform1(self, xobs, tobs, L = 30, overlap = 0.5):
+
+        if self.multiple_trajectories == True:
+           
             x_values = xobs[0]
             t_values = tobs[0]
             #print("x", x_values.shape)
@@ -135,36 +216,27 @@ class wsindy:
         n = xobs.shape[1]
         w_sparse = np.zeros((Theta_0.shape[1], n))
         #res = []
-        #mats = []  
+        mats = []  
         #ps_all = [[]]
-        #ts_grids = []  
+        ts_grids = []  
         #RTs = [] 
         #Gs = [] #[n,1]
         #bs = [] #[n,1]
 
-        if self.opt_tfsupp == False:
-            V, Vp = self.Uniform_grid(tobs, L, overlap, [0, np.inf, 0] )
+        V, Vp, grid = self.Uniform_grid(tobs, L, overlap, [0, np.inf, 0])
+        print("size V", V.shape)
 
         for i in range(n):
-            
-            #if self.opt_tfsupp == True:
-                #k = self.get_kneepoint(xobs[:, i])
-                #print('k', k)
-                #L = int(self.get_support(M, 2, k)*2)
-                #print('support', L)
-                #print("k", k)
-                #V, Vp = self.Uniform_grid(tobs, L, overlap, [0, np.inf, 0] )
 
-            #mats.append([V, Vp])
-            #ts_grids.append(ab_grid)
+            mats.append([V, Vp])
+            ts_grids.append(grid)
 
-            if useGLS > 0:
-                Cov = Vp.dot(Vp.T) + useGLS*np.identity(V.shape[0])
+            if self.useGLS > 0:
+                Cov = Vp.dot(Vp.T) + self.useGLS*np.identity(V.shape[0])
                 RT = np.linalg.cholesky(Cov)
                 G = lstsq(RT, V.dot(Theta_0))[0]
                 b = lstsq(RT, Vp.dot(xobs[:, i]))[0]
             else:
-                #print("here")
                 RT = 1/np.linalg.norm(Vp, 2, 1)
                 RT = np.reshape(RT, (RT.size, 1))
                 G = np.multiply(V.dot(Theta_0), RT)
@@ -179,8 +251,7 @@ class wsindy:
                     np.multiply((1/M_diag), w_sparse_temp))
                 w_sparse[:, i] = temptemp
             else:
-                w_sparse_temp = self.sparsifyDynamics(
-                    G, b, 1)
+                w_sparse_temp = self.sparsifyDynamics(G, b, 1)
                 w_sparse[:, i] = np.ndarray.flatten(w_sparse_temp)
 
             #RTs.append(RT)
@@ -188,6 +259,8 @@ class wsindy:
             #bs.append(b)
         self.coef = w_sparse
         self.tags = tags
+        self.mats = mats
+        self.ts_grids = ts_grids
         return  self #w_sparse,  ts_grids , mats 
     
     def simulate(self, x0, t_span, t_eval):
@@ -195,7 +268,7 @@ class wsindy:
         #print(self.coef)
 
         rows, cols = self.tags.shape
-        tol_ode = 10**(-13)
+        tol_ode = 10**(-14)
         def rhs(t, x):
             term = np.ones(rows)
             for row in range(rows):
@@ -239,7 +312,7 @@ class wsindy:
             V[k, :] = V_row
             Vp[k, :] = Vp_row
 
-        return V, Vp, #grid
+        return V, Vp, grid
 
     
     def tf_mat_row(self, g, gp, t, t1, tk, param):
@@ -425,7 +498,7 @@ class wsindy:
 
             ab_grid[k, :] = np.array([a, b])
             ps[k] = p
-        return V, Vp#, ab_grid, ps
+        return V, Vp, ab_grid, # ps
 
 
     def sparsifyDynamics(self, Theta, dXdt, n, M=None):
@@ -515,11 +588,9 @@ class wsindy:
                 cos_col[m] = np.cos(self.trigs[i]*xobs[m, :])
             theta_0 = np.hstack([theta_0, sin_col, cos_col])
             tags = np.vstack([tags, trig_inds])
-        
-        if len(tags) != 0:
-            tags = np.vstack([np.zeros((1, d)), tags])
-        else:
-            tags = np.zeros((1, d))
+
+        tags = np.vstack([np.zeros((1, d)), tags])
+        # print(tags)
         return theta_0, tags
     
     def basis_fcn(self, p, q):
@@ -570,41 +641,3 @@ class wsindy:
         else:
             b = np.argwhere((t >= (c+s)))[0]
         return p, a, b
-
-    '''''
-    def get_kneepoint(self, x):
-        M = len(x)
-        N = int(np.ceil(M/2))
-        #print(M)
-        Ufft = abs(np.fft.fftshift(np.fft.fft(x)))
-        Ufft = np.cumsum(Ufft)
-        Ufft = Ufft[0:N]
-        kn = KneeLocator(np.arange(N), Ufft, curve='convex',
-                        direction='increasing')
-        #kn.plot_knee()
-        return N - kn.knee + 1
-    '''''
-
-    #Code by Dan Messenger
-    def get_support(self, N, tauhat, k):
-        ks = (np.arange(0, N) - np.floor(N/2))**2
-        err = np.zeros((np.floor(N/2).astype(int)-1, 1))
-        m = 1
-        err[0] = np.abs((k/tauhat)**2-np.sum(ks))
-        check = 0
-        while check == False and m <= (N-3)/2:
-            m = m + 1
-            x = np.linspace(-1, 1, 2*m + 1)
-            phigrid = self.get_tf(16)(x)
-            phigrid = np.hstack((phigrid, np.zeros((N-2*m-1))))
-            phi_fft = np.fft.fftshift(np.abs(np.fft.fft(phigrid)))
-            phi_fft = phi_fft/np.sum(phi_fft)
-            err[m-1] = np.abs((k/tauhat)**2-np.sum(phi_fft*ks))
-            check = err[m-1] > err[m-2] 
-        return m
-
-    #Test function
-    def get_tf(self, p):
-        def g(t): return (1-t**2)**p
-        return g
-
