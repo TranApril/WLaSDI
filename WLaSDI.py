@@ -1,6 +1,6 @@
 import numpy as np
 import numpy.linalg as LA
-import wsindy as ws
+import WLaSDI.wsindy as ws
 #import LaSDI.pywsindy as ws
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp2d, Rbf
